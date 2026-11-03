@@ -1,0 +1,24 @@
+[package]
+name = "ap-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ap-core = { path = "../ap-core" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+ap-gateway = { path = "../ap-gateway" }
+ap-store = { path = "../ap-store" }
+ap-psp = { path = "../ap-psp" }
+sqlx = { workspace = true }
+

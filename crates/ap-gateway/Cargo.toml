@@ -1,0 +1,29 @@
+[package]
+name = "ap-gateway"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ap-core = { path = "../ap-core" }
+ap-store = { path = "../ap-store" }
+ap-psp = { path = "../ap-psp" }
+ap-agent = { path = "../ap-agent" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sqlx = { workspace = true }
+async-trait = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+async-stream = { workspace = true }
+futures-util = { workspace = true }
+

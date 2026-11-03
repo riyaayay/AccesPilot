@@ -1,0 +1,24 @@
+[package]
+name = "ap-harness"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ap-core = { path = "../ap-core" }
+ap-store = { path = "../ap-store" }
+ap-psp = { path = "../ap-psp" }
+ap-agent = { path = "../ap-agent" }
+ap-gateway = { path = "../ap-gateway" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+proptest = { workspace = true }
+reqwest = { workspace = true }
+wiremock = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+

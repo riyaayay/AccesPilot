@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AccessPilot — Payments Control Plane</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        code, pre, .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .gradient-border {
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: linear-gradient(180deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%);
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+    <!-- Header -->
+    <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+            <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-lg text-white shadow-lg shadow-indigo-500/30">AP</div>
+            <div>
+                <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                    AccessPilot <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-950 text-indigo-400 border border-indigo-800">Control Plane</span>
+                </h1>
+                <p class="text-xs text-slate-400">Deterministic spend control plane for AI agents on Hyperswitch</p>
+            </div>
+        </div>
+        <div class="flex items-center space-x-4">
+            <div id="chain-badge" class="px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 bg-emerald-950 text-emerald-400 border border-emerald-800 shadow-sm">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>CHAIN INTACT (SHA-256)</span>
+            </div>
+            <div id="connection-status" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+                <span>SSE LIVE</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="max-w-7xl mx-auto p-6 space-y-6">
+        <!-- Top Row: Active Task & Spend Meter -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Active Task Form -->
+            <div class="gradient-border rounded-xl p-5 shadow-xl space-y-4">
+                <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                    <span>Task Configuration</span>
+                    <span class="text-xs font-normal text-indigo-400">Section 8.2</span>
+                </h2>
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Active Task ID</label>
+                    <input id="input-task-id" type="text" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-cyan-300 focus:outline-none focus:border-indigo-500" value="00000000-0000-0000-0000-000000000001" />
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Goal</label>
+                    <input id="input-goal" type="text" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200" value="Research financial market trends" />
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-slate-400 mb-1">Spend Cap</label>
+                        <input id="input-cap" type="number" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200" value="5000" />
+                        <span class="text-[10px] text-slate-500">₹50.00 (5000 paise)</span>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-400 mb-1">Autonomy</label>
+                        <select id="input-autonomy" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200">
+                            <option value="within_rules">Within Rules</option>
+                            <option value="ask_every_time">Ask Every Time</option>
+                            <option value="no_paid_access">No Paid Access</option>
+                        </select>
+                    </div>
+                </div>
+                <button onclick="createNewTask()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs py-2 px-4 rounded-lg transition shadow-md shadow-indigo-600/20">
+                    Create New Task with Cap
+                </button>
+            </div>
+
+            <!-- Spend Meter: Cap as Limit, not a balance -->
+            <div class="lg:col-span-2 gradient-border rounded-xl p-5 shadow-xl flex flex-col justify-between">
+                <div>
+                    <div class="flex items-center justify-between mb-2">
+                        <div>
+                            <span class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Budget Meter</span>
+                            <span class="ml-2 text-xs text-amber-400 font-medium">Cap as Limit (not a balance)</span>
+                        </div>
+                        <span id="meter-cap-label" class="text-base font-bold text-white font-mono">₹50.00 CAP</span>
+                    </div>
+                    <p class="text-xs text-slate-400 mb-4">Guaranteed by atomic database statement: <code class="text-indigo-300 font-mono text-[11px]">reserved + captured <= cap_minor</code></p>
+                    
+                    <!-- Progress Bar -->
+                    <div class="w-full h-7 bg-slate-900 rounded-lg overflow-hidden flex p-1 border border-slate-800">
+                        <div id="bar-captured" style="width: 50%" class="h-full bg-emerald-500 rounded-l transition-all duration-500 flex items-center justify-center text-[10px] font-bold text-emerald-950 font-mono">₹25</div>
+                        <div id="bar-reserved" style="width: 0%" class="h-full bg-amber-500 transition-all duration-500 flex items-center justify-center text-[10px] font-bold text-amber-950 font-mono"></div>
+                        <div id="bar-remaining" style="width: 50%" class="h-full bg-slate-800 rounded-r transition-all duration-500 flex items-center justify-center text-[10px] text-slate-400 font-mono">₹25 Rem</div>
+                    </div>
+                </div>
+
+                <!-- Stats breakdown -->
+                <div class="grid grid-cols-4 gap-4 mt-6 pt-4 border-t border-slate-800/80 text-center">
+                    <div>
+                        <div class="text-[10px] uppercase font-semibold text-slate-400">Total Cap</div>
+                        <div id="val-cap" class="text-lg font-bold text-slate-100 font-mono">₹50.00</div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] uppercase font-semibold text-emerald-400">Captured</div>
+                        <div id="val-captured" class="text-lg font-bold text-emerald-400 font-mono">₹25.00</div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] uppercase font-semibold text-amber-400">Reserved</div>
+                        <div id="val-reserved" class="text-lg font-bold text-amber-400 font-mono">₹0.00</div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] uppercase font-semibold text-cyan-400">Remaining</div>
+                        <div id="val-remaining" class="text-lg font-bold text-cyan-400 font-mono">₹25.00</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Middle Row: Interactive Demo Actions -->
+        <div class="gradient-border rounded-xl p-5 shadow-xl">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center justify-between">
+                <span>Demo Scripts & Chaos Triggers</span>
+                <span class="text-xs text-indigo-400">Section 15.1 beats</span>
+            </h2>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <button onclick="runAgentDemo()" class="flex flex-col items-center justify-center p-3 rounded-lg bg-indigo-900/40 hover:bg-indigo-900/60 border border-indigo-700/50 transition">
+                    <span class="text-lg mb-1">🤖</span>
+                    <span class="text-xs font-semibold text-indigo-200">Run Agent Demo</span>
+                    <span class="text-[10px] text-indigo-400">A → B → C → D (Denial)</span>
+                </button>
+                <button onclick="runStormDemo()" class="flex flex-col items-center justify-center p-3 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 border border-amber-700/50 transition">
+                    <span class="text-lg mb-1">⚡</span>
+                    <span class="text-xs font-semibold text-amber-200">Idempotency Storm</span>
+                    <span class="text-[10px] text-amber-400">100 concurrent requests</span>
+                </button>
+                <button onclick="runReconcilerDemo()" class="flex flex-col items-center justify-center p-3 rounded-lg bg-cyan-900/40 hover:bg-cyan-900/60 border border-cyan-700/50 transition">
+                    <span class="text-lg mb-1">🔄</span>
+                    <span class="text-xs font-semibold text-cyan-200">Run Reconciler</span>
+                    <span class="text-[10px] text-cyan-400">Pass A & B Two-Way Heal</span>
+                </button>
+                <button onclick="runTamperDemo()" class="flex flex-col items-center justify-center p-3 rounded-lg bg-rose-900/40 hover:bg-rose-900/60 border border-rose-700/50 transition">
+                    <span class="text-lg mb-1">🛡️</span>
+                    <span class="text-xs font-semibold text-rose-200">Tamper Ledger</span>
+                    <span class="text-[10px] text-rose-400">Demonstrates Hash Detection</span>
+                </button>
+                <button onclick="refreshAll()" class="flex flex-col items-center justify-center p-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 transition">
+                    <span class="text-lg mb-1">🔍</span>
+                    <span class="text-xs font-semibold text-slate-200">Verify Chain</span>
+                    <span class="text-[10px] text-slate-400">Recompute SHA-256</span>
+                </button>
+            </div>
+            <div id="demo-output" class="mt-3 p-3 bg-slate-900/90 rounded-lg text-xs font-mono text-cyan-300 border border-slate-800 hidden"></div>
+        </div>
+
+        <!-- Lower Grid: Policy Editor & Live Ledger Timeline -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Policy DSL Editor -->
+            <div class="gradient-border rounded-xl p-5 shadow-xl space-y-3 flex flex-col justify-between">
+                <div>
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Spending Policy DSL</span>
+                        <span class="text-xs text-indigo-400">Typed Rules as Data</span>
+                    </div>
+                    <textarea id="policy-json" rows="14" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs font-mono text-emerald-300 focus:outline-none focus:border-indigo-500 leading-relaxed">{
+  "version": 1,
+  "autonomy": "within_rules",
+  "task_cap": {"amount_minor": 5000, "currency": "INR"},
+  "per_purchase_cap": {"amount_minor": 2000, "currency": "INR"},
+  "rules": [
+    {
+      "id": "allow-trusted",
+      "then": "allow",
+      "when": {
+        "all": [
+          {"provider": {"in": ["provider_a", "provider_b", "provider_c"]}},
+          {"amount_minor": {"lte": 2000}}
+        ]
+      },
+      "reason": "trusted provider under ₹20 cap"
+    },
+    {
+      "id": "deny-over-budget",
+      "then": "deny",
+      "when": {"amount_minor": {"gt": 3000}},
+      "reason": "single purchases above ₹30 denied"
+    }
+  ]
+}</textarea>
+                </div>
+                <div class="flex items-center space-x-3 pt-2">
+                    <button onclick="dryRunPolicy()" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium py-2 rounded-lg border border-slate-600 transition">
+                        Dry-Run Candidate
+                    </button>
+                    <button onclick="shadowPolicy()" class="flex-1 bg-amber-900/50 hover:bg-amber-900 text-amber-200 text-xs font-medium py-2 rounded-lg border border-amber-700 transition">
+                        Shadow Mode
+                    </button>
+                    <button onclick="activatePolicy()" class="flex-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-medium py-2 rounded-lg transition">
+                        Activate v1
+                    </button>
+                </div>
+                <div id="dry-run-results" class="mt-2 text-xs font-mono p-2 bg-slate-900 rounded border border-slate-800 hidden"></div>
+            </div>
+
+            <!-- Live Audit Ledger Timeline -->
+            <div class="gradient-border rounded-xl p-5 shadow-xl flex flex-col justify-between">
+                <div>
+                    <div class="flex items-center justify-between mb-3">
+                        <span class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Live Audit Ledger (Append-Only)</span>
+                        <span class="text-xs text-cyan-400 font-mono">Stream: /v1/tasks/:id/stream</span>
+                    </div>
+                    <div id="ledger-timeline" class="space-y-2 max-h-[360px] overflow-y-auto pr-2">
+                        <div class="text-xs text-slate-500 italic">Waiting for events...</div>
+                    </div>
+                </div>
+                <div class="text-[11px] text-slate-500 pt-3 border-t border-slate-800 flex justify-between items-center">
+                    <span>Tamper-evident SHA-256 hash chaining</span>
+                    <button onclick="loadLedger()" class="text-indigo-400 hover:underline">Reload Full History</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom: Incidents List -->
+        <div class="gradient-border rounded-xl p-5 shadow-xl">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center justify-between">
+                <span>Self-Healing & Reconciler Incidents</span>
+                <span class="text-xs text-indigo-400">Section 9.5</span>
+            </h2>
+            <div id="incidents-list" class="space-y-2 text-xs font-mono">
+                <div class="text-slate-500 italic">No drifts or incidents opened. System in sync with provider.</div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let currentTaskId = document.getElementById("input-task-id").value;
+        let eventSource = null;
+
+        function updateTaskId() {
+            currentTaskId = document.getElementById("input-task-id").value;
+            connectSSE();
+            refreshAll();
+        }
+
+        async function refreshAll() {
+            await fetchBudget();
+            await loadLedger();
+            await verifyChain();
+            await loadIncidents();
+        }
+
+        async function fetchBudget() {
+            try {
+                const res = await fetch(`/v1/tasks/${currentTaskId}/budget`);
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                const cap = (data.cap_minor / 100).toFixed(2);
+                const captured = (data.captured_minor / 100).toFixed(2);
+                const reserved = (data.reserved_minor / 100).toFixed(2);
+                const remaining = (data.remaining_minor / 100).toFixed(2);
+
+                document.getElementById("meter-cap-label").innerText = `₹${cap} CAP`;
+                document.getElementById("val-cap").innerText = `₹${cap}`;
+                document.getElementById("val-captured").innerText = `₹${captured}`;
+                document.getElementById("val-reserved").innerText = `₹${reserved}`;
+                document.getElementById("val-remaining").innerText = `₹${remaining}`;
+
+                const capVal = data.cap_minor || 1;
+                const capPct = Math.min(100, (data.captured_minor / capVal) * 100);
+                const resPct = Math.min(100 - capPct, (data.reserved_minor / capVal) * 100);
+                const remPct = Math.max(0, 100 - (capPct + resPct));
+
+                const barCap = document.getElementById("bar-captured");
+                const barRes = document.getElementById("bar-reserved");
+                const barRem = document.getElementById("bar-remaining");
+
+                barCap.style.width = `${capPct}%`;
+                barCap.innerText = capPct > 10 ? `₹${captured}` : "";
+
+                barRes.style.width = `${resPct}%`;
+                barRes.innerText = resPct > 10 ? `₹${reserved}` : "";
+
+                barRem.style.width = `${remPct}%`;
+                barRem.innerText = remPct > 10 ? `₹${remaining}` : "";
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadLedger() {
+            try {
+                const res = await fetch(`/v1/tasks/${currentTaskId}/ledger`);
+                if (!res.ok) return;
+                const events = await res.json();
+                renderLedger(events);
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function renderLedger(events) {
+            const container = document.getElementById("ledger-timeline");
+            if (!events || events.length === 0) {
+                container.innerHTML = `<div class="text-xs text-slate-500 italic">No events recorded yet.</div>`;
+                return;
+            }
+
+            container.innerHTML = events.map(e => `
+                <div class="p-2.5 rounded bg-slate-900 border border-slate-800 text-xs font-mono space-y-1">
+                    <div class="flex items-center justify-between">
+                        <span class="font-bold text-indigo-400">#${e.seq} <span class="px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 text-[10px] uppercase ml-1">${e.type}</span></span>
+                        <span class="text-[10px] text-slate-500">${e.created_at ? e.created_at.slice(11, 19) : ''}</span>
+                    </div>
+                    <div class="text-[11px] text-slate-300 break-words">${JSON.stringify(e.payload)}</div>
+                    <div class="text-[9px] text-slate-500 truncate">SHA: ${e.hash}</div>
+                </div>
+            `).join("");
+        }
+
+        async function verifyChain() {
+            try {
+                const res = await fetch(`/v1/tasks/${currentTaskId}/ledger/verify`);
+                const data = await res.json();
+                const badge = document.getElementById("chain-badge");
+
+                if (data.status === "intact" || data.valid === true) {
+                    badge.className = "px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 bg-emerald-950 text-emerald-400 border border-emerald-800 shadow-sm";
+                    badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-500"></span><span>CHAIN INTACT (SHA-256)</span>`;
+                } else {
+                    badge.className = "px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 bg-rose-950 text-rose-400 border border-rose-800 shadow-sm animate-bounce";
+                    badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-rose-500"></span><span>TAMPER DETECTED @ Seq #${data.broken_seq}</span>`;
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadIncidents() {
+            try {
+                const res = await fetch(`/v1/incidents`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const container = document.getElementById("incidents-list");
+                if (data.length === 0) {
+                    container.innerHTML = `<div class="text-slate-500 italic">No drifts or incidents opened. System in sync with provider.</div>`;
+                    return;
+                }
+                container.innerHTML = data.map(inc => `
+                    <div class="p-2 bg-slate-900 border border-slate-800 rounded flex justify-between items-center text-xs">
+                        <div>
+                            <span class="text-rose-400 font-bold">[${inc.kind}]</span>
+                            <span class="text-slate-400 ml-2">${JSON.stringify(inc.details)}</span>
+                        </div>
+                        <span class="text-[10px] text-slate-500">${inc.opened_at.slice(11, 19)}</span>
+                    </div>
+                `).join("");
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function connectSSE() {
+            if (eventSource) eventSource.close();
+            eventSource = new EventSource(`/v1/tasks/${currentTaskId}/stream`);
+            eventSource.onmessage = function(event) {
+                fetchBudget();
+                loadLedger();
+                verifyChain();
+            };
+        }
+
+        async function createNewTask() {
+            const goal = document.getElementById("input-goal").value;
+            const cap = parseInt(document.getElementById("input-cap").value);
+            const autonomy = document.getElementById("input-autonomy").value;
+
+            const res = await fetch("/v1/tasks", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    tenant_id: "tenant_default",
+                    goal: goal,
+                    cap_minor: cap,
+                    currency: "INR",
+                    autonomy: autonomy,
+                    policy_version: 1
+                })
+            });
+            const data = await res.json();
+            document.getElementById("input-task-id").value = data.task_id;
+            updateTaskId();
+        }
+
+        async function runAgentDemo() {
+            const out = document.getElementById("demo-output");
+            out.classList.remove("hidden");
+            out.innerText = "Launching agent loop: Provider A (Free) → Provider B (₹10) → Provider C (₹15) → Provider D (₹40 Denial)...";
+
+            const res = await fetch("/v1/demo/run-agent", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ task_id: currentTaskId })
+            });
+            const data = await res.json();
+            out.innerText = `Agent loop executed for task: ${data.task_id}. Watch live ledger below!`;
+            setTimeout(refreshAll, 1000);
+        }
+
+        async function runStormDemo() {
+            const out = document.getElementById("demo-output");
+            out.classList.remove("hidden");
+            out.innerText = "Firing 100 concurrent requests against one idempotency key...";
+            const res = await fetch("/v1/demo/storm", { method: "POST" });
+            const data = await res.json();
+            out.innerText = `Storm Result: requests=${data.requests}, new_claims=${data.new_claims} (exactly 1 charge!), replays=${data.replays}`;
+        }
+
+        async function runReconcilerDemo() {
+            const out = document.getElementById("demo-output");
+            out.classList.remove("hidden");
+            out.innerText = "Executing two-way reconciler pass (ledger vs simulated provider)...";
+            const res = await fetch("/v1/admin/reconcile", { method: "POST" });
+            const data = await res.json();
+            out.innerText = `Reconciler Report: scanned=${data.stuck_scanned}, healed_captured=${data.healed_captured}, healed_released=${data.healed_released}, drifts_detected=${data.drifts_detected}`;
+            refreshAll();
+        }
+
+        async function runTamperDemo() {
+            const out = document.getElementById("demo-output");
+            out.classList.remove("hidden");
+            out.innerText = "Tampering with ledger hash sequence #0 in database...";
+            const res = await fetch("/v1/demo/tamper", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ task_id: currentTaskId })
+            });
+            out.innerText = "Tampered! Recomputing ledger hash chain...";
+            setTimeout(verifyChain, 500);
+        }
+
+        async function dryRunPolicy() {
+            const res = await fetch("/v1/policies/1/dry-run", { method: "POST" });
+            const data = await res.json();
+            const out = document.getElementById("dry-run-results");
+            out.classList.remove("hidden");
+            out.innerHTML = data.diffs.map(d => `
+                <div class="flex justify-between py-1 border-b border-slate-800">
+                    <span>${d.provider} (₹${d.amount_minor/100})</span>
+                    <span class="${d.verdict === 'Allow' ? 'text-emerald-400' : 'text-rose-400'} font-bold">${d.verdict}</span>
+                </div>
+            `).join("");
+        }
+
+        async function shadowPolicy() {
+            await fetch("/v1/policies/1/shadow", { method: "POST" });
+            alert("Policy marked for Shadow Mode evaluation");
+        }
+
+        async function activatePolicy() {
+            await fetch("/v1/policies/1/activate", { method: "POST" });
+            alert("Policy activated live!");
+        }
+
+        document.getElementById("input-task-id").addEventListener("change", updateTaskId);
+        window.onload = function() {
+            updateTaskId();
+        };
+    </script>
+</body>
+</html>
+
