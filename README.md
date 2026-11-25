@@ -1,138 +1,166 @@
-# AccessPilot — Payments Control Plane for AI-Agent Spend
+<div align="center">
+
+# 🛩️ AccessPilot
+
+### A payments control plane that lets AI agents spend money without ever overspending, double-charging, or unlocking before settlement.
+
+Built in Rust on top of [Juspay Hyperswitch](https://github.com/juspay/hyperswitch) · PostgreSQL 16 · Fail-closed by design
 
 [![CI](https://github.com/riyarathod/accesspilot/actions/workflows/ci.yml/badge.svg)](https://github.com/riyarathod/accesspilot/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Good First Issues](https://img.shields.io/github/issues/riyarathod/accesspilot/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/riyarathod/accesspilot/labels/good%20first%20issue)
 
-AccessPilot is an industrial-grade payments control plane for AI-agent autonomous spending on [Juspay's Hyperswitch](https://github.com/juspay/hyperswitch). It guarantees that AI agents never exceed budgets, never duplicate payments on retries or crashes, never unlock content before verified settlement, and fail closed on all unknown conditions.
+[**Quick Start**](#-quick-start) · [**Demo**](#-3-minute-demo) · [**Benchmarks**](#-benchmarks) · [**Architecture**](#-architecture) · [**Contributing**](#-contributing) · [**Roadmap**](#-roadmap)
 
----
+<!-- Add a 10–15 second GIF of the dashboard here: the budget meter filling, the 100-request storm, and the red TAMPER DETECTED badge. -->
+<!-- ![AccessPilot dashboard demo](docs/assets/demo.gif) -->
 
-## Architecture Diagram
-
-```mermaid
-flowchart TD
-    subgraph AgentLayer["AI Agent Loop"]
-        Planner["Planner (Groq LLaMA / Gemini / Scripted)"]
-        Runner["AgentRunner (Max 8 Steps, Delimited Content)"]
-    end
-
-    subgraph ControlPlane["AccessPilot Control Plane (ap-gateway)"]
-        ResourceGW["Resource Gateway (GET /v1/resources/:provider/:id)"]
-        PolicyEngine["Pure Policy DSL Engine (decide())"]
-        PurchaseFlow["Purchase Service (Idempotent 2-Tx Flow)"]
-        Reconciler["Two-Way Reconciler (Pass A & Pass B)"]
-        SSE["Live SSE Timeline Stream"]
-    end
-
-    subgraph StorageLayer["PostgreSQL 16 Storage (ap-store)"]
-        Budgets["budgets (CHECK: reserved + captured <= cap)"]
-        Purchases["purchases (Closed lifecycle ENUM)"]
-        Grants["grants (FK: Unlocks only on CAPTURED)"]
-        Ledger["ledger_events (Append-only, SHA-256 Chained)"]
-        IdemKeys["idempotency_keys (Write-ahead Key Lock)"]
-    end
-
-    subgraph PSP["Payment Gateway Adapter (ap-psp)"]
-        Hyperswitch["Hyperswitch Adapter (Juspay Switch Sandbox)"]
-        Simulated["Simulated PSP (Deterministic UUIDv5 IDs)"]
-    end
-
-    Planner --> Runner
-    Runner -->|1. Fetch Resource| ResourceGW
-    ResourceGW -->|402 Payment Required + HMAC Offer| Runner
-    Runner -->|2. POST /purchases| PolicyEngine
-    PolicyEngine -->|Verdict::Allow| PurchaseFlow
-    PurchaseFlow -->|Atomic Claim| IdemKeys
-    PurchaseFlow -->|Tx1: Reserve| Budgets
-    PurchaseFlow -->|UUIDv5 Charge| PSP
-    PSP -->|Outcome| PurchaseFlow
-    PurchaseFlow -->|Tx2: Settle & Grant| Purchases
-    Purchases --> Grants
-    PurchaseFlow -->|Append Event| Ledger
-    PurchaseFlow -->|Emit Event| SSE
-    Reconciler -.->|Audit & Heal| Purchases
-    Reconciler -.->|Two-Way Check| PSP
-```
+</div>
 
 ---
 
-## Measured Benchmark Results (`make bench`)
+## Why AccessPilot?
 
-Every metric below is measured directly on hardware by running `make bench` (`cargo run -p ap-harness --bin ap-harness`). There are no simulated placeholders.
+AI agents are starting to buy things: API calls, datasets, paywalled content. But an agent that retries, crashes, or hallucinates a price can drain a budget in seconds, and a naive "check balance, then charge" flow breaks under concurrency.
 
-```
-AccessPilot harness  |  2026-11-03  |  8-core Intel / 16GB RAM  |  Postgres 16 (Local/Docker)  |  rustc 1.99.1 (58cf8f9c3 2026-10-13)  |  seed 42
-T1  cap_under_concurrency   attempts=5000 accepted=10  denied=4990 captured=4966  cap=5000  violations=0   PASS
-T2  idempotency_storm       requests=1000 provider_charges=1 replays=999                                     PASS
-T3  fail_closed_matrix      passed=17/17                                                                     PASS
-T4  crash_recovery          failpoints=2 runs=200 orphans=0 invariant_failures=0                         PASS
-T5  model_and_properties    cases=100000 disagreements=0                                                       PASS
-T6  latency                 decide_p99=1us req_p50=6.82ms req_p99=14.31ms rps_spread=4176 rps_single_task=4516       INFO
-T7  reconciliation          drifts=50 detected=50 healed=10 incidents=40                                   PASS
-T8  anomaly_detection       samples=1000 precision=1.00 recall=1.00                                              PASS
-T9  ledger_tamper           mutations=100 detected=100                                                        PASS
-T10 hyperswitch_sandbox     payments=10 matched=10 p50=60ms p95=62ms                                         INFO
-```
+AccessPilot sits between your agent and the payment provider and enforces four guarantees:
 
-Detailed test specifications, pass criteria, and logs can be reviewed in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+| Guarantee | What it means |
+|---|---|
+| 💰 **Never exceed the budget** | Reservations are one atomic PostgreSQL update, so concurrent agents cannot race past the cap. |
+| 🔁 **Never pay twice** | Write-ahead idempotency keys mean retries and crashes produce one provider charge. |
+| 🔒 **Never unlock early** | Content access is granted only after a verified `CAPTURED` settlement. |
+| 🛑 **Fail closed on the unknown** | Timeouts, unmapped statuses and forged signatures hold the funds and withhold access until reconciled. |
+
+> **Status:** AccessPilot targets sandbox and test environments (Hyperswitch Dummy Connector). It does not move real money. See [What's not in scope](#-whats-not-in-scope).
 
 ---
 
-## Quick Start
+## ✨ Features
 
-### Prerequisites
-- [Docker & Docker Compose](https://www.docker.com/) or local PostgreSQL 16
-- [Rust 1.80+](https://www.rust-lang.org/) (`cargo`)
+- **Atomic budget reservation** in PostgreSQL with a `CHECK (reserved + captured <= cap)` constraint as a second line of defense
+- **Idempotent two-transaction purchase flow** (reserve → charge → settle and grant)
+- **Pure policy engine** with an order-independent DSL: `Deny` > `RequireApproval` > `Allow`, default `Deny`
+- **HTTP 402 resource gateway** with HMAC-signed offers for agent-readable paywalls
+- **Two-way reconciler** that audits local state against the provider and heals or escalates drift
+- **Tamper-evident ledger**: append-only events chained with SHA-256
+- **Live dashboard** with an SSE timeline, budget meter and one-click failure simulations
+- **Pluggable PSP adapters**: Hyperswitch sandbox, or a deterministic simulated PSP for tests
+- **Agent loop included**: scripted, Groq LLaMA or Gemini planners with an 8-step cap
 
-### 1. Launch Environment
+---
+
+## 🚀 Quick Start
+
+**Requirements:** [Docker](https://www.docker.com/) (or local PostgreSQL 16) and [Rust 1.80+](https://www.rust-lang.org/)
+
 ```bash
-# Clone the repository
 git clone https://github.com/riyarathod/accesspilot.git
 cd accesspilot
 
-# Start PostgreSQL and run migrations
-make up
+make up       # start PostgreSQL and run migrations
+make test     # unit, integration and property tests
+make bench    # 10-test verification harness (T1–T10)
+make demo     # start the gateway on :8080
 ```
 
-### 2. Run Verification Suite
-```bash
-# Run the 10-test benchmark harness
-make bench
-
-# Run all unit, integration, and property tests
-make test
-```
-
-### 3. Launch Dashboard & Gateway
-```bash
-# Start ap-gateway service on port 8080
-make demo
-```
-Open your browser to: **[http://localhost:8080/dashboard](http://localhost:8080/dashboard)**
+Then open **http://localhost:8080/dashboard**.
 
 ---
 
-## 3-Minute Verification Demo
+## 🎬 3-Minute Demo
 
-The dashboard provides single-click verification of every core claim:
+Every core claim can be verified from the dashboard with one click:
 
-1. **Set the Rules**: Inspect the typed policy JSON editor. Budget meter shows `₹50.00 limit (not a balance)`.
-2. **Free Resource**: Provider A is queried; content is delivered immediately with zero charges and no transaction.
-3. **Purchases Within Budget**: Agent purchases Provider B (₹10.00) and Provider C (₹15.00); ledger timeline logs `reserved`, `provider_result`, `captured`, and `grant_issued`. Budget displays `₹25.00 captured / ₹25.00 remaining`.
-4. **Cap Enforcement**: Agent requests Provider D (₹40.00); request is rejected: `"expected total ₹40.00 exceeds remaining budget ₹25.00"`. Zero calls made to provider.
-5. **Idempotency Storm**: Click **"Fire 100-Request Storm"**; 100 concurrent requests with the identical key yield exactly **1 charge** and **99 cached replays**.
-6. **Crash Recovery**: Click **"Simulate Mid-Purchase Crash"**, then click **"Run Reconciler"**; stranded reservations are automatically identified, reconciled against the provider, and captured or released without violating invariants.
-7. **Tamper Detection**: Click **"Simulate Ledger Tamper"**; the dashboard ledger badge instantly turns red: **"TAMPER DETECTED AT SEQ #3"**.
+1. **Set the rules.** Edit the typed policy JSON. The meter shows `₹50.00 limit (not a balance)`.
+2. **Free resource.** Provider A is delivered instantly, with no charge and no transaction.
+3. **Purchases within budget.** The agent buys B (₹10) and C (₹15). The ledger shows `reserved → provider_result → captured → grant_issued`.
+4. **Cap enforcement.** Provider D (₹40) is rejected: `expected total ₹40.00 exceeds remaining budget ₹25.00`. The provider is never called.
+5. **Idempotency storm.** Fire 100 concurrent requests with one key: exactly **1 charge** and **99 cached replays**.
+6. **Crash recovery.** Simulate a mid-purchase crash, run the reconciler, and watch stranded reservations get captured or released.
+7. **Tamper detection.** Edit a ledger row and the badge turns red: `TAMPER DETECTED AT SEQ #3`.
 
-Full script details are documented in [docs/DEMO.md](docs/DEMO.md).
+Full walkthrough: [docs/DEMO.md](docs/DEMO.md)
 
 ---
 
-## Design Decisions
+## 📊 Benchmarks
 
-### 1. PostgreSQL Atomic Reservation Over Redis
-Distributed systems that reserve budget in Redis and subsequently persist to a SQL database suffer from split-brain scenarios during network partitions or node failovers. AccessPilot enforces budget limits directly in PostgreSQL using a single atomic conditional update:
+Run `make bench` to reproduce. Results below are from an 8-core Intel / 16 GB machine, PostgreSQL 16 (Docker), rustc 1.99.1, seed 42.
+
+| Test | What it checks | Result |
+|---|---|---|
+| **T1** Cap under concurrency | 5,000 concurrent purchase attempts against a ₹5,000 cap | **0 cap violations** |
+| **T2** Idempotency storm | 1,000 requests, same key | **1 provider charge**, 999 replays |
+| **T3** Fail-closed matrix | 17 unknown or hostile conditions | **17 / 17** denied or held |
+| **T4** Crash recovery | 200 runs across 2 failpoints | **0 orphans, 0 invariant failures** |
+| **T5** Model and property tests | 100,000 random cases vs a reference model | **0 disagreements** |
+| **T6** Latency | Policy `decide()` / full request | p99 **1 µs** / p50 **6.8 ms**, p99 **14.3 ms** (~4.2k req/s) |
+| **T7** Reconciliation | 50 injected state drifts | **50 / 50 detected**, 10 auto-healed, 40 escalated |
+| **T8** Anomaly detection | 1,000 synthetic samples | precision 1.00, recall 1.00 |
+| **T9** Ledger tamper | 100 row mutations | **100 / 100 detected** |
+| **T10** Hyperswitch sandbox | 10 real sandbox payments | **10 / 10 matched**, p95 62 ms |
+
+Pass criteria, raw logs and hardware notes: [docs/BENCHMARKS.md](docs/BENCHMARKS.md). T8 uses synthetic data, so treat it as a regression check, not a production accuracy claim.
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TD
+    subgraph Agent["AI Agent Loop"]
+        Planner["Planner (Groq LLaMA / Gemini / Scripted)"]
+        Runner["AgentRunner (max 8 steps)"]
+    end
+
+    subgraph CP["Control Plane · ap-gateway"]
+        RGW["Resource Gateway"]
+        Policy["Policy Engine · decide()"]
+        Purchase["Purchase Service · idempotent 2-Tx flow"]
+        Recon["Two-Way Reconciler"]
+        SSE["Live SSE Timeline"]
+    end
+
+    subgraph DB["PostgreSQL 16 · ap-store"]
+        Budgets["budgets"]
+        Purchases["purchases"]
+        Grants["grants"]
+        Ledger["ledger_events (SHA-256 chained)"]
+        Idem["idempotency_keys"]
+    end
+
+    subgraph PSP["Payment Adapters · ap-psp"]
+        HS["Hyperswitch sandbox"]
+        Sim["Simulated PSP"]
+    end
+
+    Planner --> Runner
+    Runner -->|1. fetch resource| RGW
+    RGW -->|402 + HMAC offer| Runner
+    Runner -->|2. POST /purchases| Policy
+    Policy -->|Allow| Purchase
+    Purchase --> Idem
+    Purchase -->|Tx1: reserve| Budgets
+    Purchase -->|charge| PSP
+    PSP -->|outcome| Purchase
+    Purchase -->|Tx2: settle + grant| Purchases
+    Purchases --> Grants
+    Purchase --> Ledger
+    Purchase --> SSE
+    Recon -.->|audit and heal| Purchases
+    Recon -.->|two-way check| PSP
+```
+
+### Design decisions
+
+<details>
+<summary><b>1. PostgreSQL atomic reservation instead of Redis</b></summary>
+
+Reserving in Redis and persisting to SQL later risks split-brain during failovers. AccessPilot enforces the cap in one conditional update:
+
 ```sql
 UPDATE budgets
    SET reserved_minor = reserved_minor + $1, version = version + 1
@@ -140,62 +168,128 @@ UPDATE budgets
    AND reserved_minor + captured_minor + $1 <= cap_minor
 RETURNING cap_minor, reserved_minor, captured_minor;
 ```
-This guarantees ACID isolation, eliminates race conditions under high concurrency, and ensures that budget reservations never drift from ledger events.
 
-### 2. Pure Functional Rust for Core Business Logic (`ap-core`)
-All policy evaluations, lifecycle transitions, state machines, and anomaly detection algorithms live in `crates/ap-core`. This crate is strictly pure:
-- `#![deny(clippy::unwrap_used, clippy::panic)]`
-- Zero I/O, zero network calls, zero async runtimes.
-- Money is represented solely as `i64` minor units + `Currency` enum; zero floating-point math, zero unsafe casts.
-Because the core is pure, it can be tested exhaustively with randomized property tests (100,000 cases in T5) and verified against a formal reference model.
+If zero rows are updated, the purchase is denied. There is no window between "check" and "reserve".
+</details>
 
-### 3. Order-Independent Policy Rules
-Rules in policy files are evaluated in an order-independent manner:
-1. **Hard Invariants First**: Non-negotiable checks (currency consistency, known prices/taxes/fees, budget ceilings).
-2. **User Rules (Most Restrictive Wins)**: `Deny` > `RequireApproval` > `Allow`.
-3. **Fail-Closed Default**: If no rule explicitly allows a purchase, the policy engine defaults strictly to `Deny`.
+<details>
+<summary><b>2. A pure Rust core (<code>ap-core</code>)</b></summary>
 
-### 4. Hold and Withhold on Any Unknown
-Whenever the system encounters uncertainty (provider network timeout, unmapped HTTP status codes, missing tax breakdowns, or forged signatures):
-- Funds remain held in `PENDING_UNKNOWN` so that budgets cannot be double-spent.
-- Resource access grants are strictly withheld.
-- The two-way reconciler or a human operator resolves the state out-of-band before access is unlocked.
+Policy evaluation, lifecycle transitions and anomaly detection live in a crate with `#![deny(clippy::unwrap_used, clippy::panic)]`, no I/O, no network and no async runtime. Money is `i64` minor units plus a `Currency` enum, with no floats. Purity is what makes 100,000-case property testing against a reference model possible.
+</details>
 
----
+<details>
+<summary><b>3. Order-independent policy rules</b></summary>
 
-## What Is Not in Scope
+Hard invariants run first (currency consistency, known prices, taxes and fees, budget ceilings). User rules then resolve as most-restrictive-wins: `Deny` > `RequireApproval` > `Allow`. If nothing explicitly allows, the answer is `Deny`.
+</details>
 
-- **Real Money & Live Card Rails**: AccessPilot is a payments control plane targeting test and sandbox environments (e.g. Hyperswitch Sandbox Dummy Connector). It does not initiate real fiat transfers.
-- **PCI Scope**: AccessPilot never receives or stores PAN, CVV, or card data. All card tokens reside in server environment variables or are handled directly by payment switches.
-- **Custodial Wallets & Escrow**: AccessPilot enforces spending limits (caps), not pre-funded wallet balances or escrow accounts.
-- **Multi-Region Distributed Consensus**: AccessPilot relies on single-primary PostgreSQL for linearizable ledger sequencing and atomic reservation.
+<details>
+<summary><b>4. Hold and withhold on any unknown</b></summary>
+
+On a timeout, unmapped status, missing tax breakdown or forged signature, funds stay in `PENDING_UNKNOWN` so the budget cannot be double-spent, access is withheld, and the reconciler or a human resolves the state before anything unlocks.
+</details>
 
 ---
 
-## Repository Structure
+## 🗂️ Repository Structure
 
 ```
-├── Cargo.toml                       # Cargo workspace definition
-├── Makefile                         # up, test, bench, demo targets
-├── docker-compose.yml               # PostgreSQL 16 container definition
+accesspilot/
 ├── crates/
-│   ├── ap-core/                     # Pure domain logic (AST, money, lifecycle, rules)
-│   ├── ap-store/                    # PostgreSQL migrations & atomic operations
-│   ├── ap-psp/                      # Hyperswitch adapter & simulated PSP
-│   ├── ap-agent/                    # LLM (Groq/Gemini) & scripted agent loop
-│   ├── ap-gateway/                  # Axum HTTP API, purchase flow, reconciler
-│   └── ap-harness/                  # Verification benchmark harness (T1-T10)
-├── dashboard/
-│   └── index.html                   # Single-page dashboard (SSE timeline, budget meter)
-└── docs/
-    ├── ARCHITECTURE.md              # Architectural invariants & component specs
-    ├── BENCHMARKS.md                # Raw benchmark outputs & hardware specs
-    └── DEMO.md                      # 3-minute walk-through script
+│   ├── ap-core/       # Pure domain logic: money, lifecycle, policy rules
+│   ├── ap-store/      # PostgreSQL migrations and atomic operations
+│   ├── ap-psp/        # Hyperswitch adapter and simulated PSP
+│   ├── ap-agent/      # Scripted / Groq / Gemini agent loop
+│   ├── ap-gateway/    # Axum HTTP API, purchase flow, reconciler
+│   └── ap-harness/    # Benchmark harness (T1–T10)
+├── dashboard/         # Single-page dashboard (SSE timeline, budget meter)
+├── docs/              # ARCHITECTURE.md, BENCHMARKS.md, DEMO.md
+├── Makefile           # up, test, bench, demo
+└── docker-compose.yml # PostgreSQL 16
 ```
 
+New here? Start with [`ap-core`](crates/ap-core). It has no I/O and is the easiest crate to read.
+
 ---
+
+## 🚫 What's Not in Scope
+
+- **Real money.** Sandbox and test rails only (Hyperswitch Dummy Connector).
+- **PCI scope.** AccessPilot never sees PAN, CVV or card data.
+- **Wallets and escrow.** It enforces spending *caps*, not pre-funded balances.
+- **Multi-region consensus.** It relies on a single-primary PostgreSQL for linearizable sequencing.
+
+AccessPilot is an independent project and is not affiliated with or endorsed by Juspay.
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] More PSP adapters (Stripe test mode, Razorpay test mode)
+- [ ] Per-provider and per-category budgets
+- [ ] Policy DSL linter and dry-run mode
+- [ ] Prometheus metrics and OpenTelemetry traces
+- [ ] Ledger anchoring (periodic hash checkpoints to external storage)
+- [ ] Python and TypeScript client SDKs
+- [ ] Multi-agent budget delegation (parent budget → child budgets)
+- [ ] Dashboard dark mode and approval inbox for `RequireApproval` verdicts
+
+Have an idea? [Open a discussion](https://github.com/riyarathod/accesspilot/discussions).
+
+---
+
+## 🤝 Contributing
+
+**Contributions are very welcome, whether it's your first Rust PR or your fiftieth.**
+
+### Ways to help
+
+| If you like... | Try this |
+|---|---|
+| 🧪 Testing and breaking things | Add a failure case to the T3 fail-closed matrix or a new crash failpoint to T4 |
+| 🦀 Rust | Add a policy rule type, or improve error types in `ap-core` |
+| 🔌 Integrations | Write a new PSP adapter in `ap-psp` |
+| 📝 Docs | Improve `docs/ARCHITECTURE.md`, add diagrams, fix typos |
+| 🎨 Frontend | Polish the dashboard, add dark mode |
+| 🔐 Security | Review the idempotency and reconciler logic and report issues |
+
+### Getting started
+
+1. Browse [**good first issues**](https://github.com/riyarathod/accesspilot/labels/good%20first%20issue) or [**help wanted**](https://github.com/riyarathod/accesspilot/labels/help%20wanted).
+2. Comment on the issue so nobody duplicates work.
+3. Fork, branch, and make your change:
+   ```bash
+   make up
+   cargo fmt --all && cargo clippy --all-targets -- -D warnings
+   make test
+   make bench   # if you touched the purchase flow, store or reconciler
+   ```
+4. Open a PR describing *what* changed and *why*. We review quickly and are friendly to newcomers.
+
+### Ground rules
+
+- **Invariants are sacred.** A PR that weakens a guarantee (budget cap, idempotency, fail-closed) needs a test proving the guarantee still holds.
+- **Keep `ap-core` pure.** No I/O, no async, no `unwrap`/`panic`.
+- **Money is integers.** No floating point anywhere near amounts.
+- **Add tests.** New behavior needs a unit or property test.
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) and our [Code of Conduct](CODE_OF_CONDUCT.md). Found a vulnerability? Please report it privately via [SECURITY.md](SECURITY.md) instead of a public issue.
+
+---
+
+## 💬 Community and Support
+
+- 🐛 **Bugs and features:** [GitHub Issues](https://github.com/riyarathod/accesspilot/issues)
+- 💡 **Questions and ideas:** [GitHub Discussions](https://github.com/riyarathod/accesspilot/discussions)
+- ⭐ **Like the project?** A star helps others find it.
+
+---
+
+## 🙏 Acknowledgments
+
+Built on [Juspay Hyperswitch](https://github.com/juspay/hyperswitch), with [Axum](https://github.com/tokio-rs/axum), [SQLx](https://github.com/launchbadge/sqlx) and PostgreSQL.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
-
+Dual-licensed under [Apache 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Unless you state otherwise, any contribution you submit is dual-licensed the same way.
